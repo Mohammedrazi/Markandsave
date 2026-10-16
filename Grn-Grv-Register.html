@@ -603,7 +603,7 @@ function persist(o){mem=o;try{localStorage.setItem(KEY,JSON.stringify(o))}catch(
 /* ===== GOOGLE SHEET SYNC ===== */
 const API_URL='https://script.google.com/macros/s/AKfycbz3UJgDOXXwKQXpVjtbUrSnSXGGnjBr7rToSF9HJMV95l7ibJz30gCBmddE-w2qQPvY/exec';   // from Apps Script > Deploy > Web app
 const API_TOKEN='MarkSave-Qatar-7391';                      // must match TOKEN in the Apps Script
-const POLL_MS=1000;                                        // how often sheet edits are pulled into the website
+const POLL_MS=2500;                                        // how often sheet edits are pulled into the website
 const SYNC=/^https:\/\/script\.google\.com\//.test(API_URL);
 let lastSig='';
 /* Accept the sheet's column names in any spelling (e.g. 'Invoice Value', 'MIRO DOCUMENT NUMBER') and map them to the site's fields */
@@ -625,8 +625,9 @@ async function apiCall(body){
 async function pull(){
  if(!SYNC)return false;
  if(WQ>0)return false;
- const r=await fetch(API_URL+'?action=read&token='+encodeURIComponent(API_TOKEN)+'&_='+Date.now());
- const j=await readJson(r);typeof syncClear==='function'&&syncClear('net');
+ let j;for(let i=0;;i++){try{j=await readJson(await fetch(API_URL+'?action=read&token='+encodeURIComponent(API_TOKEN)+'&_='+Date.now()));break}
+  catch(e){if(i>=3)throw e;await new Promise(r=>setTimeout(r,1200*(i+1)))}}   /* sheet busy/locked: retry quietly before showing an error */
+ typeof syncClear==='function'&&syncClear('net');
  const sig=JSON.stringify([j.rows,j.master]);if(sig===lastSig)return false;lastSig=sig;
  const rn=normRows(j.rows);
  {const pe=(typeof accPend==='function')?accPend():[];pe.forEach(p=>{const r=(rn[p.loc]||[]).find(x=>String(x.id)===String(p.id));if(r)r.acs='Received'})}
@@ -644,7 +645,7 @@ async function pull(){
  return true}
 /* all writes to the Google Sheet go one after another (the sheet is locked while it saves); busy/lock errors are retried */
 let WCHAIN=Promise.resolve(),WQ=0;
-const qrun=fn=>{WQ++;const r=WCHAIN.then(fn);WCHAIN=r.then(()=>{},()=>{}).then(()=>{WQ--});return r};
+const qrun=fn=>{WQ++;const r=WCHAIN.then(fn);WCHAIN=r.then(()=>{},()=>{}).then(()=>{WQ--;if(WQ===0&&typeof pollNow==='function')setTimeout(pollNow,0)});return r};
 const retry=async(fn,n=4)=>{for(let i=0;;i++){try{return await fn()}catch(e){if(i>=n||/unknown action|wrong token/i.test(e.message))throw e;await new Promise(r=>setTimeout(r,2500*(i+1)))}}};
 async function api(b){
   if(isView())throw new Error('View-only login – editing is not allowed');
@@ -748,8 +749,12 @@ async function restore(){if(!isAdmin())return toast('Only Admin can restore',1);
  if(!found)throw 0;
  if(SYNC){toast('Restore is off while Google Sheet sync is on – paste the data into the sheet instead',1);return}if(!confirm('Replace all current entries with this Excel backup?'))return;persist(o);loadAll();toast('Excel backup restored')}catch(e){console.error(e);toast('Not a valid Excel backup file',1)}};f.click()}
 function paintAll(){DV++;const o=store();L.forEach(l=>rows[l]=o[l]||[]);if(page==='entry')tabs();else if(focused){pend=true;tabs()}else go()}
-async function loadAll(){paintAll();try{if(await pull())paintAll()}catch(e){console.error(e);toast('Could not reach Google Sheet: '+e.message,1);typeof syncMsg==='function'&&syncMsg('⚠ Could not read Google Sheet: '+e.message+' (check Deploy > Who has access = Anyone, and the web app URL).','net')}}
-if(SYNC)setInterval(async()=>{if(!authed()||document.hidden||focused)return;try{if(await pull())paintAll()}catch(e){console.error(e);typeof syncMsg==='function'&&syncMsg('⚠ Could not read Google Sheet: '+e.message+' (check your internet, the web app URL and Deploy > Who has access = Anyone).','net')}},POLL_MS);
+async function loadAll(){paintAll();try{if(await pull())paintAll()}catch(e){console.error(e);0;typeof syncMsg==='function'&&syncMsg('⚠ Could not read Google Sheet: '+e.message+' (check Deploy > Who has access = Anyone, and the web app URL).','net')}}
+let polling=false;
+async function pollNow(){if(!SYNC||polling||!authed()||document.hidden||focused)return;polling=true;
+ try{if(await pull())paintAll()}catch(e){console.error(e);typeof syncMsg==='function'&&syncMsg('⚠ Could not read Google Sheet: '+e.message+' (check your internet, the web app URL and Deploy > Who has access = Anyone).','net')}finally{polling=false}}
+if(SYNC)(async function pollLoop(){for(;;){await new Promise(r=>setTimeout(r,POLL_MS));await pollNow()}})();
+addEventListener('focus',pollNow);addEventListener('online',pollNow);
 document.addEventListener('visibilitychange',()=>{if(!document.hidden&&SYNC&&authed())loadAll()});
 function tabs(){const b=document.getElementById('tabs');b.replaceChildren(
  ...(isAcc()||isView()?[]:[$('button',{className:'tab'+(page==='entry'?' on':''),textContent:'➕ New Entry',on:{click:()=>{page='entry';go()}}})]),
@@ -1444,7 +1449,7 @@ function reg(l){
   const setS=(k,d)=>{SORT[l]=SORT[l]&&SORT[l].k===k&&SORT[l].d===d?null:{k,d};paintS();body()};
   const th=(k,lab)=>{const u=$('button',{className:'sb',textContent:'▲',title:'Sort ascending (A→Z, old→new)',on:{click:()=>setS(k,1)}}),d=$('button',{className:'sb',textContent:'▼',title:'Sort descending (Z→A, new→old)',on:{click:()=>setS(k,-1)}});hb.push([u,k,1],[d,k,-1]);return $('th',{},$('div',{className:'sh'},$('span',{textContent:lab}),$('span',{className:'sb2'},u,d)))};
   const t=$('table',{},$('thead',{},$('tr',{},th('#','SL. No.'),F.map(f=>th(f[0],f[1])),$('th'))),tb);paintS();
- t.addEventListener('focusin',()=>focused=true);t.addEventListener('focusout',()=>{focused=false;if(pend){pend=false;go()}});
+ t.addEventListener('focusin',e=>{if(/^(INPUT|TEXTAREA)$/.test(e.target.tagName))focused=true});t.addEventListener('focusout',()=>{focused=false;if(pend){pend=false;go()}});
  return $('div',{},$('div',{className:'tools'},$('h2',{textContent:'Location '+l+' – GRN & GRV Register',style:'margin:0'}),canEdit(l)?'':$('span',{className:'bd',textContent:isAcc()&&USERS[getU()].loc===l?'✏ Editable: Accounts Status, Remarks, Invoice Scanning, MIRO, MIRO Doc No.':'👁 View only',style:'background:#8a94a3;color:#fff'}),$('span',{className:'sp'}),$('button',{type:'button',className:'btn alt',textContent:'🖨 Print',title:'Print / save invoice details as PDF',on:{click:()=>printDlg(l)}}),s),
   $('div',{className:'tw'},t),rows[l].length?'':$('p',{className:'mut',textContent:'No entries yet. Use “New Entry” to add the first one.'}))}
 /* ===== Accounts Status values + Accounts Receiving page (PO scan) + Print popup ===== */
@@ -1632,9 +1637,9 @@ if('serviceWorker' in navigator){addEventListener('load',()=>{navigator.serviceW
     await pull();paintAll();
     var t=new Date().toLocaleTimeString([],{hour:'2-digit',minute:'2-digit',second:'2-digit'});
     b.title='Last synced '+t+' – tap to refresh again';
-    toast('✔ Synced with Google Sheet · '+t);
+    toast('✔ Data updated');
    }else{paintAll();toast('Refreshed')}
-  }catch(e){console.error(e);typeof syncMsg==='function'&&syncMsg('⚠ Could not read Google Sheet: '+e.message,'net');toast('Could not reach Google Sheet: '+e.message,1)}
+  }catch(e){console.error(e);typeof syncMsg==='function'&&syncMsg('⚠ Could not read Google Sheet: '+e.message,'net');0}
   finally{b.classList.remove('spin');busy=false}
  }
  b.onclick=refreshNow;document.body.appendChild(b);
@@ -1654,8 +1659,7 @@ if('serviceWorker' in navigator){addEventListener('load',()=>{navigator.serviceW
  window.syncMsg=function(text,kind){
   kind=kind||(/^⚠ Could not/.test(text||'')?'net':'cfg');
   if(!text){delete M.cfg;render();return}
-  var old=M[kind];M[kind]={text:text,time:(old&&old.text===text)?old.time:tm()};render();
-  if(!old||old.text!==text)toast('Sync problem – tap the ⚠ icon for details',1)};
+  var old=M[kind];M[kind]={text:text,time:(old&&old.text===text)?old.time:tm()};render();};
  window.syncClear=function(kind){if(M[kind]){delete M[kind];render()}};
  badge.onclick=function(){panel.classList.toggle('open')};
  panel.querySelector('.sp-x').onclick=panel.querySelector('.sp-c').onclick=function(){panel.classList.remove('open')};
