@@ -573,9 +573,9 @@ const KEY='grn_register_v1';let mem={};
 function store(){try{const v=localStorage.getItem(KEY);return v?JSON.parse(v):{}}catch(e){return mem}}
 function persist(o){mem=o;try{localStorage.setItem(KEY,JSON.stringify(o))}catch(e){}}
 /* ===== GOOGLE SHEET SYNC ===== */
-const API_URL='https://script.google.com/macros/s/AKfycby8B-AyvgGwCJmx2uuyn1qZjdqTK0FdZ2-xmei-_2oemnIu0qXRWZhKX95NoB1R4hT1/exec';   // from Apps Script > Deploy > Web app
+const API_URL='https://script.google.com/macros/s/AKfycbz3UJgDOXXwKQXpVjtbUrSnSXGGnjBr7rToSF9HJMV95l7ibJz30gCBmddE-w2qQPvY/exec';   // from Apps Script > Deploy > Web app
 const API_TOKEN='MarkSave-Qatar-7391';                      // must match TOKEN in the Apps Script
-const POLL_MS=20000;                                        // how often sheet edits are pulled into the website
+const POLL_MS=10000;                                        // how often sheet edits are pulled into the website
 const SYNC=/^https:\/\/script\.google\.com\//.test(API_URL);
 let lastSig='';
 /* Accept the sheet's column names in any spelling (e.g. 'Invoice Value', 'MIRO DOCUMENT NUMBER') and map them to the site's fields */
