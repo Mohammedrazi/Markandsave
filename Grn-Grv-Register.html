@@ -573,9 +573,9 @@ const KEY='grn_register_v1';let mem={};
 function store(){try{const v=localStorage.getItem(KEY);return v?JSON.parse(v):{}}catch(e){return mem}}
 function persist(o){mem=o;try{localStorage.setItem(KEY,JSON.stringify(o))}catch(e){}}
 /* ===== GOOGLE SHEET SYNC ===== */
-const API_URL='https://script.google.com/macros/s/AKfycbzO2_GCSZDQiVwYEhPn4A5504AxaoR--l6D9xG4iBzTF5nI3a4IW2a_xIWsWCtwPtH_NA/exec';   // from Apps Script > Deploy > Web app
+const API_URL='https://script.google.com/macros/s/AKfycby8B-AyvgGwCJmx2uuyn1qZjdqTK0FdZ2-xmei-_2oemnIu0qXRWZhKX95NoB1R4hT1/exec';   // from Apps Script > Deploy > Web app
 const API_TOKEN='MarkSave-Qatar-7391';                      // must match TOKEN in the Apps Script
-const POLL_MS=8000;                                        // how often sheet edits are pulled into the website
+const POLL_MS=20000;                                        // how often sheet edits are pulled into the website
 const SYNC=/^https:\/\/script\.google\.com\//.test(API_URL);
 let lastSig='';
 /* Accept the sheet's column names in any spelling (e.g. 'Invoice Value', 'MIRO DOCUMENT NUMBER') and map them to the site's fields */
@@ -596,15 +596,18 @@ async function apiCall(body){
  return readJson(r)}
 async function pull(){
  if(!SYNC)return false;
- if(typeof accPend==='function'&&(ACCBUSY||accPend().length))return false;
+ if(WQ>0)return false;
  const r=await fetch(API_URL+'?action=read&token='+encodeURIComponent(API_TOKEN)+'&_='+Date.now());
  const j=await readJson(r);
  const sig=JSON.stringify([j.rows,j.master]);if(sig===lastSig)return false;lastSig=sig;
- const rn=normRows(j.rows);persist(rn);
+ const rn=normRows(j.rows);
+ {const pe=(typeof accPend==='function')?accPend():[];pe.forEach(p=>{const r=(rn[p.loc]||[]).find(x=>String(x.id)===String(p.id));if(r)r.acs='Received'})}
+ persist(rn);
  {const first=L.map(l=>rn[l][0]).find(Boolean),d=j.debug||{};let msg='';
   const nf=L.filter(l=>d[l]==='TAB NOT FOUND'),mc=L.filter(l=>d[l]&&d[l].columnsMissing&&d[l].columnsMissing.length);
   if(nf.length)msg='⚠ Google Sheet tab not found for: '+nf.join(', ')+' – the tab name must contain the location code.';
   else if(mc.length)msg='⚠ Column headers not recognised in '+mc.map(l=>l+' ('+d[l].columnsMissing.join(', ')+')').join('; ')+' (header row '+d[mc[0]].headerRow+').';
+  else if(first&&!('acs' in first))msg='⚠ The Google Sheet script is outdated – it is not sending Accounts Status. Paste the new Code.gs in Apps Script, then Deploy > Manage deployments > pencil > New version > Deploy.';
   else if(first&&!('iv' in first&&'md' in first))msg='⚠ The Google Sheet script is outdated – it is not sending Invoice Value / MIRO Doc Number. Paste the new Code.gs, then Deploy > Manage deployments > pencil > New version > Deploy.';
   else if(!L.some(l=>rn[l].length)&&L.some(l=>d[l]&&d[l].headerRow))msg='⚠ Connected to the sheet, but no entries were found (checked header row '+d[L.find(l=>d[l]&&d[l].headerRow)].headerRow+'). Entries need a date, vendor code, invoice number, value, LPO or receiver ID.';
   let w=document.getElementById('sw');
@@ -612,20 +615,25 @@ async function pull(){
  if(j.master&&Object.keys(j.master).length){Object.keys(VEND).forEach(k=>delete VEND[k]);Object.assign(VEND,j.master);
   const dl=document.getElementById('vl');if(dl)dl.replaceChildren(...Object.keys(VEND).map(c=>$('option',{value:c})))}
  return true}
+/* all writes to the Google Sheet go one after another (the sheet is locked while it saves); busy/lock errors are retried */
+let WCHAIN=Promise.resolve(),WQ=0;
+const qrun=fn=>{WQ++;const r=WCHAIN.then(fn);WCHAIN=r.then(()=>{},()=>{}).then(()=>{WQ--});return r};
+const retry=async(fn,n=4)=>{for(let i=0;;i++){try{return await fn()}catch(e){if(i>=n||/unknown action|wrong token/i.test(e.message))throw e;await new Promise(r=>setTimeout(r,2500*(i+1)))}}};
 async function api(b){
   DV++;
   if(b.action==='bulk'&&!(isAdmin()||isAcc()))throw new Error('Only Accounts or Admin can change Accounts Status');
   if(b.action==='update'){for(const k of Object.keys(b.data||{}))if(!canField(b.loc,k))throw new Error('You do not have permission to edit this field')}
   else if(b.loc&&!canEdit(b.loc))throw new Error('You can only edit your own location');
   else if(b.action==='add'&&!isAdmin()&&b.data){b.data.md=''}
- if(SYNC){
+ if(SYNC)return qrun(async()=>{
   if(b.action==='bulk'){
-   try{return await apiCall(b)}
+   try{return await retry(()=>apiCall(b))}
    catch(e){if(!/unknown action/i.test(e.message))throw e;
     /* older Apps Script without 'bulk' – update the rows one by one */
-    for(let i=0;i<b.items.length;i+=6)await Promise.all(b.items.slice(i,i+6).map(it=>apiCall({action:'update',loc:it.loc,id:it.id,data:b.data})));
+    for(const it of b.items)await retry(()=>apiCall({action:'update',loc:it.loc,id:it.id,data:b.data}));
     return{ok:true,updated:b.items.length}}}
-  const j=await apiCall(b);if(b.action==='add'&&j.id!=null){}return j}
+  if(b.action==='update')return retry(()=>apiCall(b));
+  return apiCall(b)})
  const o=store();L.forEach(l=>o[l]=o[l]||[]);const a=o[b.loc]||[];
  if(b.action==='add')a.push({id:Date.now()+'-'+Math.random().toString(36).slice(2,6),...b.data});
  else if(b.action==='update'){const r=a.find(x=>x.id===b.id);if(r)Object.assign(r,b.data)}
@@ -1420,11 +1428,14 @@ async function accFlush(say){
  if(ACCBUSY)return;const items=accPend();if(!items.length)return;
  ACCBUSY=true;
  try{await api({action:'bulk',items,data:{acs:'Received'}});
+  if(SYNC){const rr=await readJson(await fetch(API_URL+'?action=read&token='+encodeURIComponent(API_TOKEN)+'&_='+Date.now())),rn=normRows(rr.rows);
+   const miss=items.filter(i=>{const r=(rn[i.loc]||[]).find(x=>String(x.id)===String(i.id));return !r||String(r.acs||'').trim()!=='Received'});
+   if(miss.length)throw new Error(miss.length+' row(s) were NOT saved in the Google Sheet – the Apps Script web app is outdated. In Apps Script paste the new Code.gs, then Deploy > Manage deployments > pencil > New version > Deploy')}
   accPendSave(accPend().filter(p=>!items.some(i=>i.loc===p.loc&&String(i.id)===String(p.id))));
   if(say)say('✔ '+items.length+' invoice'+(items.length===1?'':'s')+' changed to Received – Google Sheet updated');toast('Google Sheet updated');
   ACCBUSY=false;setTimeout(()=>{pull().then(x=>x&&paintAll()).catch(()=>{})},1500)}
  catch(e){ACCBUSY=false;if(say)say('Saved on the website, but the Google Sheet update failed ('+e.message+'). Retrying automatically…',1);toast('Google Sheet update failed – will retry',1);
-  clearTimeout(ACCRT);ACCRT=setTimeout(()=>accFlush(say),10000)}}
+  clearTimeout(ACCRT);ACCRT=setTimeout(()=>accFlush(say),30000)}}
 setTimeout(()=>{if(authed&&authed())accFlush()},3000);
 let ACCNODE=null;
 function accPage(){
